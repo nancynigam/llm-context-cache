@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+# Add parent directory to path so we can import context_cache
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import time
 from context_cache.model_wrapper import HFModelWrapper
 
