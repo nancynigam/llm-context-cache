@@ -2,6 +2,7 @@ from typing import Any, List, Optional, Tuple
 from typing import Hashable
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
+import copy
 from context_cache.cache import SimpleKVCache
 
 class HFModelWrapper:
@@ -78,7 +79,7 @@ class HFModelWrapper:
                 use_cache=True,
             )
         past = outputs.past_key_values # Extracts the past_key_values (KV cache) from the model output
-        self.prefix_cache.put(key, past)
+        self.prefix_cache.put(key, copy.deepcopy(past))
         return past, input_ids
     
     def generate_with_prefix_cache(
