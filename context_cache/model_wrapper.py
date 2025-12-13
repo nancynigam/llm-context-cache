@@ -4,18 +4,33 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import copy
 from context_cache.cache import SimpleKVCache
+from enum import Enum
+
+class CacheMode(str, Enum):
+    NONE = "none"     # recompute prefix everytime, no caching
+    EXACT = "exact"   # exact-prefix KV cache
+    TRIE = "trie"     # new longest-prefix trie cache
 
 class HFModelWrapper:
-    def __init__(self, model_id: str = "gpt2", device: str = None):
+    def __init__(self, model_id: str = "gpt2", device: str = None,
+                 cache_mode: CacheMode = CacheMode.EXACT):
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(model_id)
         self.model.eval()
-        self.prefix_cache = SimpleKVCache(max_size=128)
-
+       
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.model.to(self.device)
+
+        # feature flag
+        self.cache_mode = cache_mode
+
+        # exact-prefix cache (what you already had)
+        self.exact_cache = SimpleKVCache(max_size=128)
+
+        # trie cache placeholder; we’ll implement / import later
+        self.trie_cache = None  # will define below
 
 
     def tokenize(self, text:str):
@@ -53,7 +68,8 @@ class HFModelWrapper:
         # PyTorch tensors are not hashable & KV cache needs hashable keys to look up cached KV states.
         return tuple(input_ids[0].tolist()) 
 
-    def get_past_for_prefix(self, prefix: str):
+    # Exact match prefix
+    def get_past_for_prefix_exact(self, prefix: str):
         """Return (past_key_values, input_ids) from cache or compute & store."""
         prefix_inputs = self.tokenize(prefix)
         # output of tokenize is inputs = {
@@ -67,21 +83,46 @@ class HFModelWrapper:
         prefix_ids = prefix_inputs["input_ids"]
         key = HFModelWrapper.tensor_key(prefix_ids)
 
-        cached = self.prefix_cache.get(key)
+        cached = self.exact_cache.get(key)
         if cached is not None:
-            print("[CACHE] HIT for prefix")
+            print("[EXACT CACHE] HIT for prefix")
             return copy.deepcopy(cached), prefix_ids
 
-        print("[CACHE] MISS for prefix")
+        print("[EXACT CACHE] MISS for prefix")
         with torch.no_grad():
             outputs = self.model(
                 **prefix_inputs, # tracks input_ids & attention_mask
                 use_cache=True,
             )
         past = outputs.past_key_values # Extracts the past_key_values (KV cache) from the model output
-        self.prefix_cache.put(key, copy.deepcopy(past))
+        self.exact_cache.put(key, copy.deepcopy(past))
         return past, prefix_ids
     
+    def _get_past_for_prefix(self, prefix: str):
+        """
+        Internal helper that routes based on cache_mode.
+        Returns (past+kv, prefix_input_ids).
+        """
+
+        if self.cache_mode == CacheMode.NONE:
+            inputs = self.tokenize(prefix)
+            with torch.no_grad():
+                outputs = self.mode(**inputs, use_cache=True)
+            return outputs.past_key_values, inputs["input_ids"]
+        
+        elif self.cache_mode == CacheMode.EXACT:
+            return self.get_past_for_prefix_exact(prefix)
+
+        elif self.cache_mode == CacheMode.TRIE:
+            # placeholder for when you add trie logic
+            # for now, just fall back to exact so things still work
+            print("[TRIE] mode not implemented yet, using exact as fallback")
+            return self.get_past_for_prefix_exact(prefix)
+        
+        else:
+            raise ValueError(f"Unknown cache_mode: {self.cache_mode}")
+
+
     def generate_with_prefix_cache(
         self,
         prompt: str,
@@ -131,7 +172,7 @@ class HFModelWrapper:
         """
 
         # 1. Get KVs for prefix
-        past_prefix, prefix_ids = self.get_past_for_prefix(prefix)
+        past_prefix, prefix_ids = self._get_past_for_prefix(prefix)
 
         # 2. Run delta on top of prefix KVs
         delta_inputs = self.tokenize(delta)
